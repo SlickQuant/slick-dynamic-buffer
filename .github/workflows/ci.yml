@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release, Debug]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # apt/brew Boost ships no boost_asio-config.cmake, so
+    # find_package(Boost CONFIG COMPONENTS asio) only works with vcpkg's Boost.
+    # vcpkg is preinstalled on all GitHub-hosted runners, but the macOS image
+    # does not set VCPKG_INSTALLATION_ROOT - bootstrap our own copy if missing.
+    - name: Set up vcpkg
+      shell: bash
+      run: |
+        if [ -z "${VCPKG_INSTALLATION_ROOT:-}" ]; then
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_INSTALLATION_ROOT=$RUNNER_TEMP/vcpkg" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/vcpkg" >> "$GITHUB_PATH"
+        fi
+
+    # vcpkg stores built packages in VCPKG_DEFAULT_BINARY_CACHE; cache entries are
+    # content-addressed by vcpkg's ABI hash, keyed on the vcpkg checkout commit so
+    # the cache is rebuilt exactly when the runner image updates its vcpkg baseline.
+    - name: Prepare vcpkg binary cache
+      id: vcpkg-info
+      shell: bash
+      run: |
+        echo "VCPKG_DEFAULT_BINARY_CACHE=$RUNNER_TEMP/vcpkg-binary-cache" >> "$GITHUB_ENV"
+        mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
+        git config --global --add safe.directory "$VCPKG_INSTALLATION_ROOT"
+        echo "commit=$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse --short HEAD || echo unknown)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+        key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg-info.outputs.commit }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install Boost.Asio (vcpkg)
+      shell: bash
+      run: vcpkg install boost-asio
+
+    - name: Configure CMake
+      shell: bash
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Run Tests
+      working-directory: build
+      run: ctest -C ${{ matrix.build_type }} --output-on-failure
