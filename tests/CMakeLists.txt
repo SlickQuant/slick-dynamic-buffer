@@ -55,11 +55,7 @@ target_link_libraries(slick-dynamic-buffer-tests PRIVATE
 target_compile_definitions(slick-dynamic-buffer-tests PRIVATE
   SLICK_STREAM_BUFFER_ENABLE_LOSS_DETECTION=1
   SLICK_STREAM_BUFFER_MULTIPLEXER_ENABLE_LOSS_DETECTION=1
-  _WIN32_WINNT=0x0A00)
-
-# if(MSVC)
-#   target_compile_options(slick-dynamic-buffer-tests PRIVATE /wd4996)
-# endif()
+  $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>)
 
 include(GoogleTest)
 gtest_discover_tests(slick-dynamic-buffer-tests)
