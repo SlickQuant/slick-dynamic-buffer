@@ -11,51 +11,97 @@
 
 #pragma once
 
-#include <slick/stream_buffer.h>
 #include <boost/asio/buffer.hpp>
 
+#include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace slick {
 
 /**
- * @brief Boost.Asio DynamicBuffer_v1 adapter over slick::stream_buffer.
+ * @brief Named requirements (C++20 concept) for a buffer backend usable with dynamic_buffer.
  *
- * A drop-in replacement for beast::flat_buffer: pass it to boost::asio/boost::beast read
- * operations so received network bytes are written directly into the stream_buffer ring -
- * no copy is needed to hand the data to other threads or processes. When the application has
- * a complete package in the readable area, calling consume(n) publishes those n bytes to
- * consumers as one message record (it does not discard them).
+ * Satisfied by slick::stream_buffer and
+ * slick::stream_buffer_multiplexer::producer_buffer. The backend must be
+ * single-producer: all prepare/commit/consume/discard calls for one instance
+ * must come from a single thread.
+ */
+template<typename T>
+concept buffer_backend = requires(T& b, const T& cb, std::size_t n) {
+    { b.prepare(n) }  -> std::same_as<std::pair<uint8_t*, std::size_t>>;
+    { b.commit(n) };
+    { b.consume(n) };
+    { b.discard() };
+    { cb.data() }     -> std::same_as<const uint8_t*>;
+    { cb.size() }     -> std::convertible_to<std::size_t>;
+    { cb.capacity() } -> std::convertible_to<std::size_t>;
+};
+
+/**
+ * @brief Boost.Asio DynamicBuffer_v1 adapter over a slick buffer backend.
  *
- * This is a cheap copyable handle: asio composed operations copy DynamicBuffer_v1 objects by
- * value, so the adapter holds a pointer to the stream_buffer, which the application owns.
- * In-process consumers call read() on the stream_buffer directly (see stream_buffer());
- * other processes open it by shared memory name.
+ * A drop-in replacement for beast::flat_buffer: pass it to boost::asio/boost::beast
+ * read operations so received network bytes are written directly into the backend ring —
+ * no copy is needed to hand the data to other threads or processes. When the application
+ * has a complete package in the readable area, calling consume(n) publishes those n bytes
+ * to consumers as one message record (it does not discard them).
+ *
+ * Supported backends:
+ *  - slick::stream_buffer  — SPMC ring; consumers call stream_buffer.read(cursor)
+ *  - slick::stream_buffer_multiplexer::producer_buffer — fans into the shared MPMC queue
+ *
+ * This is a cheap copyable handle: asio composed operations copy DynamicBuffer_v1 objects
+ * by value, so the adapter stores a std::shared_ptr to the backend. Two constructors are
+ * provided: a shared-ownership one (pass shared_ptr<BufferT>, e.g. from add_producer())
+ * and a non-owning reference one (pass BufferT&, caller must ensure the backend outlives
+ * all copies).
  *
  * Note: each consume(n) call publishes exactly one record. If a protocol layer consumes
  * incrementally (e.g. the beast HTTP parser), records correspond to those increments; call
  * consume() yourself on message boundaries when you need strict package framing.
  */
+template<buffer_backend BufferT>
 class dynamic_buffer {
 public:
     /// The type used to represent the readable bytes as a single contiguous buffer
-    using const_buffers_type = boost::asio::const_buffer;
+    using const_buffers_type   = boost::asio::const_buffer;
     /// The type used to represent the writable bytes as a single contiguous buffer
     using mutable_buffers_type = boost::asio::mutable_buffer;
 
     /**
-     * @brief Wrap a slick::stream_buffer.
-     * @param buffer The stream buffer; must outlive this adapter and all copies of it.
-     * @param max_size Optional cap on size() + prepared bytes; clamped to buffer.capacity().
-     *                 beast/asio read operations use max_size() to limit how much they read.
+     * @brief Shared-ownership constructor — participates in the backend's ref count.
+     * @param ptr   Shared pointer to the backend; the backend stays alive as long as
+     *              this adapter (or any copy) holds a reference.
+     * @param max_size Optional cap on size() + prepared bytes; clamped to backend capacity.
      */
     explicit dynamic_buffer(
-        slick::stream_buffer& buffer,
+        std::shared_ptr<BufferT> ptr,
         std::size_t max_size = (std::numeric_limits<std::size_t>::max)()) noexcept
-        : buffer_(&buffer)
-        , max_size_(max_size < buffer.capacity() ? max_size : static_cast<std::size_t>(buffer.capacity()))
+        : buffer_(std::move(ptr))
+        , max_size_(max_size < buffer_->capacity()
+                        ? max_size
+                        : static_cast<std::size_t>(buffer_->capacity()))
+    {
+    }
+
+    /**
+     * @brief Non-owning reference constructor — backward-compatible with local backends.
+     * @param buffer The backend; must outlive this adapter and all copies of it.
+     * @param max_size Optional cap on size() + prepared bytes; clamped to buffer.capacity().
+     *                 beast/asio read operations use max_size() to limit how much they read.
+     *
+     * Internally wraps the reference in a shared_ptr with a null deleter so copies are
+     * cheap, but lifetime management remains the caller's responsibility.
+     */
+    explicit dynamic_buffer(
+        BufferT& buffer,
+        std::size_t max_size = (std::numeric_limits<std::size_t>::max)())
+        : dynamic_buffer(std::shared_ptr<BufferT>(&buffer, [](BufferT*){}), max_size)
     {
     }
 
@@ -93,7 +139,8 @@ public:
 
     /// Publish the first n readable bytes to consumers as one message record.
     /// Returns the record as consumers will see it (asio/beast callers may ignore it).
-    slick::stream_buffer::published_record consume(std::size_t n) noexcept { return buffer_->consume(n); }
+    /// The return type is deduced from BufferT::consume() — published_record for slick backends.
+    auto consume(std::size_t n) noexcept { return buffer_->consume(n); }
 
     /// Discard the readable bytes and any prepared region without publishing them,
     /// matching beast::flat_buffer::clear(). Use after a connection drops mid-message
@@ -102,14 +149,16 @@ public:
     /// lossy overwrite semantics.
     void clear() noexcept { buffer_->discard(); }
 
-    /// Access the underlying stream_buffer (e.g. for in-process consumers).
-    /// The type must be spelled slick::stream_buffer inside this class because
-    /// this member function shadows the unqualified type name.
-    slick::stream_buffer& stream_buffer() noexcept { return *buffer_; }
-    const slick::stream_buffer& stream_buffer() const noexcept { return *buffer_; }
+    /// Access the underlying backend (e.g. for in-process consumers calling read()).
+    BufferT&       buffer() noexcept       { return *buffer_; }
+    const BufferT& buffer() const noexcept { return *buffer_; }
+
+    /// Shared-ownership handle to the backend, so it can safely outlive this adapter.
+    std::shared_ptr<BufferT>       buffer_ptr() noexcept       { return buffer_; }
+    std::shared_ptr<const BufferT> buffer_ptr() const noexcept { return buffer_; }
 
 private:
-    slick::stream_buffer* buffer_;
+    std::shared_ptr<BufferT> buffer_;
     std::size_t max_size_;
 };
 

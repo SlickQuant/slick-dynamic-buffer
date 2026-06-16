@@ -5,13 +5,21 @@
 [![Header-only](https://img.shields.io/badge/header--only-yes-brightgreen.svg)](#installation)
 [![Lock-free](https://img.shields.io/badge/concurrency-lock--free-orange.svg)](#how-it-works)
 
-`slick::dynamic_buffer` is a header-only Boost.Asio `DynamicBuffer_v1` adapter over
-[slick-stream-buffer](https://github.com/SlickQuant/slick-stream-buffer), the lock-free
-single-producer multi-consumer (SPMC) byte stream buffer. It is designed as a
-**drop-in replacement for `boost::beast::flat_buffer`**: network bytes received by
-boost::asio / boost::beast are written directly into the SlickStreamBuffer ring, and
-publishing a complete message to consumer threads — or other processes via shared
-memory — requires **zero copies**.
+`slick::dynamic_buffer<BufferT>` is a header-only, template Boost.Asio `DynamicBuffer_v1`
+adapter over any slick buffer backend. It is designed as a **drop-in replacement for
+`boost::beast::flat_buffer`**: network bytes received by boost::asio / boost::beast are
+written directly into the backend ring, and publishing a complete message to consumer
+threads — or other processes via shared memory — requires **zero copies**.
+
+Supported backends (any type satisfying `slick::buffer_backend`):
+
+| Backend | Use case |
+|---------|----------|
+| `slick::stream_buffer` | Single-producer SPMC ring; consumers call `stream_buffer.read(cursor)` |
+| `slick::stream_buffer_multiplexer::producer_buffer` | Fans into an MPMC shared queue so multiplexer consumers receive the record |
+
+The library has **no hard dependency** on either backend — bring your own and include the
+relevant header alongside `<slick/dynamic_buffer.h>`.
 
 ## How it works
 
@@ -32,15 +40,14 @@ The adapter exposes the familiar dynamic-buffer interface
 ```
 
 Each consumer owns an independent cursor and reads whole messages zero-copy directly
-from the underlying SlickStreamBuffer — the consumer side is provided by
-[slick-stream-buffer](https://github.com/SlickQuant/slick-stream-buffer); see its
-documentation for the full core API.
+from the underlying buffer.
 
 ## Features
 
 - **Boost.Asio DynamicBuffer adapter** usable with boost::beast / boost::asio read operations
 - **Zero-copy fan-out** of received network data to threads and processes
-- **Lock-free** single-producer / multi-consumer broadcast via slick-stream-buffer
+- **Template backend**: works with `slick::stream_buffer` (SPMC) and `producer_buffer` (MPMC)
+- **No hard backend dependency** — the library only requires Boost.Asio
 - **Drop-in replacement** for `boost::beast::flat_buffer` (including `clear()`)
 - **Cross-platform** — Windows, Linux, macOS
 - Modern **C++20**, header-only
@@ -48,8 +55,9 @@ documentation for the full core API.
 ## Requirements
 
 - C++20 compatible compiler
-- [slick-stream-buffer](https://github.com/SlickQuant/slick-stream-buffer) v1.0.4+ (fetched automatically when not installed)
-- Boost.Asio — only the buffer types are used
+- Boost.Asio — only the buffer types are used (`boost/asio/buffer.hpp`)
+- A slick buffer backend — `slick-stream-buffer` and/or `slick-stream-buffer-multiplexer`
+  (not fetched automatically; include the backend header and link its target yourself)
 
 ## Installation
 
@@ -57,6 +65,9 @@ Header-only. Add the `include` directory to your include path:
 
 ```cpp
 #include <slick/dynamic_buffer.h>
+// also include your chosen backend:
+#include <slick/stream_buffer.h>               // for stream_buffer backend
+#include <slick/stream_buffer_multiplexer.h>   // for producer_buffer backend
 ```
 
 ### Using CMake FetchContent
@@ -72,81 +83,120 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(slick-dynamic-buffer)
 
-target_link_libraries(your_target PRIVATE slick::dynamic_buffer) # slick-stream-buffer is fetched automatically
+# Link your backend(s) separately:
+target_link_libraries(your_target PRIVATE
+    slick::dynamic_buffer
+    slick::stream_buffer)               # or slick::stream_buffer_multiplexer
 ```
 
 ## Usage
 
-### Producer: receive with boost::asio, publish on message boundaries
+### With `slick::stream_buffer` (SPMC)
 
 ```cpp
 #include <slick/dynamic_buffer.h>
+#include <slick/stream_buffer.h>
 
 // 64 MB data ring, 64K message records; named -> shared memory, nullptr -> local
 slick::stream_buffer stream(1ull << 26, 1u << 16, "market_data");
-slick::dynamic_buffer buffer(stream);   // cheap copyable handle
+slick::dynamic_buffer dyn(stream);   // CTAD deduces dynamic_buffer<stream_buffer>
 
 for (;;) {
-    std::size_t n = socket.read_some(buffer.prepare(64 * 1024));
-    buffer.commit(n);
+    std::size_t n = socket.read_some(dyn.prepare(64 * 1024));
+    dyn.commit(n);
 
     // parse the readable area; publish every complete package
-    while (std::size_t package_size = find_complete_package(buffer.data())) {
-        buffer.consume(package_size);   // publishes one record - no copy
+    while (std::size_t package_size = find_complete_package(dyn.data())) {
+        dyn.consume(package_size);   // publishes one record — no copy
     }
 }
 ```
 
-The adapter satisfies asio's `DynamicBuffer_v1` requirements, so it also works with
-composed operations such as `boost::asio::read(socket, buffer, ...)`,
-`boost::beast::http::read(...)` and `websocket::stream::read(...)`.
-
-### Consumers: independent cursors, zero-copy reads
-
-Consumers read from the underlying SlickStreamBuffer directly:
+Consumers read from the underlying buffer directly:
 
 ```cpp
 // same process:
-slick::stream_buffer& stream = buffer.stream_buffer();
-// another process:
+slick::stream_buffer& stream = dyn.buffer();
+// another process (shared memory):
 slick::stream_buffer stream("market_data");
 
 uint64_t cursor = stream.initial_reading_index();   // or 0 to replay history
 for (;;) {
     auto [data, length] = stream.read(cursor);
-    if (data == nullptr) continue;          // nothing new yet
-    handle_package(data, length);           // points directly into the ring
+    if (data == nullptr) continue;
+    handle_package(data, length);   // zero-copy pointer into the ring
 }
 ```
 
-See the [slick-stream-buffer](https://github.com/SlickQuant/slick-stream-buffer)
-documentation for the consumer API (`read`, `read_last`, `initial_reading_index`,
-`loss_count`) and ring sizing guidance.
+### With `slick::stream_buffer_multiplexer::producer_buffer` (MPMC)
+
+```cpp
+#include <slick/dynamic_buffer.h>
+#include <slick/stream_buffer_multiplexer.h>
+
+slick::stream_buffer_multiplexer mux(1024);
+auto pb = mux.add_producer(0, 1ull << 26, 1u << 16);  // shared_ptr<producer_buffer>
+
+// shared_ptr constructor (owning) — pb stays alive as long as dyn does
+slick::dynamic_buffer dyn(pb);   // CTAD deduces dynamic_buffer<producer_buffer>
+
+for (;;) {
+    std::size_t n = socket.read_some(dyn.prepare(64 * 1024));
+    dyn.commit(n);
+    while (std::size_t package_size = find_complete_package(dyn.data())) {
+        dyn.consume(package_size);   // publishes to producer ring AND fans into shared queue
+    }
+}
+```
+
+The adapter also works with composed operations such as `boost::asio::read(socket, dyn, ...)`,
+`boost::beast::http::read(...)` and `websocket::stream::read(...)`.
 
 ## API Overview
 
+### `slick::buffer_backend` concept
+
 ```cpp
-explicit dynamic_buffer(slick::stream_buffer& buffer,
-                        std::size_t max_size = /* unlimited */) noexcept;
+template<typename T>
+concept buffer_backend = requires(T& b, const T& cb, std::size_t n) {
+    { b.prepare(n) } -> std::same_as<std::pair<uint8_t*, std::size_t>>;
+    { b.commit(n) };
+    { b.consume(n) };
+    { b.discard() };
+    { cb.data() }    -> std::same_as<const uint8_t*>;
+    { cb.size() }    -> std::convertible_to<std::size_t>;
+    { cb.capacity() }-> std::convertible_to<std::size_t>;
+};
 ```
 
-Wraps a `slick::stream_buffer` (the preferred spelling of `SlickStreamBuffer`, available
-since slick-stream-buffer v1.0.4), which must outlive the adapter and all copies of it.
-`max_size` caps `size()` plus prepared bytes (clamped to `buffer.capacity()`); beast/asio
-read operations use it to limit how much they read. The adapter is a cheap copyable
-handle — asio composed operations copy `DynamicBuffer_v1` objects by value.
+### `slick::dynamic_buffer<BufferT>`
+
+```cpp
+// Shared-ownership constructor (natural for shared_ptr backends like producer_buffer)
+explicit dynamic_buffer(std::shared_ptr<BufferT> ptr,
+                        std::size_t max_size = /* unlimited */) noexcept;
+
+// Non-owning reference constructor (backward-compatible; caller manages lifetime)
+explicit dynamic_buffer(BufferT& buffer,
+                        std::size_t max_size = /* unlimited */);
+```
+
+Both constructors clamp `max_size` to `buffer.capacity()`. The adapter is a cheap
+copyable handle — asio composed operations copy `DynamicBuffer_v1` objects by value;
+copies share the underlying `shared_ptr`.
 
 - `mutable_buffers_type prepare(std::size_t n)` — contiguous writable region of n bytes;
   throws `std::length_error` if `size() + n > max_size()`
 - `void commit(std::size_t n)` — make n prepared bytes readable
-- `published_record consume(std::size_t n)` — publish the first n readable bytes as **one
-  message record**; returns the record exactly as consumers will see it
-  (asio/beast callers may ignore the return value)
+- `auto consume(std::size_t n)` — publish the first n readable bytes as **one message
+  record**; return type is deduced from `BufferT::consume()` — a `published_record` for
+  both slick backends (asio/beast callers may ignore the return value)
 - `void clear()` — drop the readable bytes and any prepared region **without publishing**,
   matching `beast::flat_buffer::clear()`
 - `const_buffers_type data()` / `std::size_t size()` — the readable (committed, unconsumed) region
 - `std::size_t max_size()` / `std::size_t capacity()` — limits, as required by `DynamicBuffer_v1`
-- `slick::stream_buffer& stream_buffer()` — access the underlying buffer (e.g. for in-process consumers)
+- `BufferT& buffer()` / `const BufferT& buffer() const` — access the underlying backend
+- `std::shared_ptr<BufferT> buffer_ptr()` — shared-ownership handle to the backend
 
 ## Important Constraints
 
@@ -155,8 +205,7 @@ Consumers are lock-free and independent.
 
 **Lossy semantics.** The producer never blocks; if it laps a slow consumer, the consumer
 skips ahead and the loss is counted. Size the rings so this cannot happen in normal
-operation — see [slick-stream-buffer](https://github.com/SlickQuant/slick-stream-buffer)
-for details and loss detection.
+operation.
 
 **Pointer invalidation.** `prepare()` may relocate the readable region to keep it
 contiguous when the ring wraps; pointers previously returned by `data()`/`prepare()`
@@ -179,7 +228,7 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Boost.Asio is required to build the tests (e.g. configure with a vcpkg toolchain file).
+Boost.Asio and at least one slick backend are required to build the tests.
 
 ## License
 

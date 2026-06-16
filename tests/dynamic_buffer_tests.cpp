@@ -10,27 +10,36 @@
  ********************************************************************************/
 
 #include <gtest/gtest.h>
-#include <slick/dynamic_buffer.h>
 
+// Boost must come before slick-queue and slick-stream-buffer-multiplexer to avoid
+// preprocessor collisions from Windows headers pulled in by the shm/atomic paths.
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
+#include <slick/dynamic_buffer.h>
+#include <slick/stream_buffer.h>
+#include <slick/stream_buffer_multiplexer.h>
+
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace net = boost::asio;
 using net::ip::tcp;
 using slick::stream_buffer;
 using slick::dynamic_buffer;
+using slick::stream_buffer_multiplexer;
 
 // The whole point of the adapter: beast/asio must accept it as a DynamicBuffer.
 // (Modern Beast uses asio's DynamicBuffer_v1 trait as its DynamicBuffer concept.)
-static_assert(net::is_dynamic_buffer_v1<dynamic_buffer>::value,
-              "dynamic_buffer must satisfy asio's DynamicBuffer_v1 requirements");
+static_assert(net::is_dynamic_buffer_v1<dynamic_buffer<stream_buffer>>::value,
+              "dynamic_buffer<stream_buffer> must satisfy asio's DynamicBuffer_v1 requirements");
+static_assert(net::is_dynamic_buffer_v1<dynamic_buffer<stream_buffer_multiplexer::producer_buffer>>::value,
+              "dynamic_buffer<producer_buffer> must satisfy asio's DynamicBuffer_v1 requirements");
 
 TEST(DynamicBufferTests, BufferCopyRoundtrip) {
     stream_buffer sb(1024, 16);
@@ -55,7 +64,7 @@ TEST(DynamicBufferTests, BufferCopyRoundtrip) {
     EXPECT_EQ(record.length, src.size());
 
     uint64_t cursor = 0;
-    auto [ptr, len] = dyn.stream_buffer().read(cursor);
+    auto [ptr, len] = dyn.buffer().read(cursor);
     ASSERT_NE(ptr, nullptr);
     ASSERT_EQ(len, src.size());
     EXPECT_EQ(std::memcmp(ptr, src.data(), len), 0);
@@ -224,4 +233,43 @@ TEST(DynamicBufferTests, AsioReadComposedOp) {
     ASSERT_NE(ptr, nullptr);
     ASSERT_EQ(len, src.size());
     EXPECT_EQ(std::memcmp(ptr, src.data(), len), 0);
+}
+
+TEST(DynamicBufferTests, ProducerBufferBackendRoundtrip) {
+    stream_buffer_multiplexer mux(64);
+    auto pb = mux.add_producer(0, 1024, 16);  // shared_ptr<producer_buffer>
+
+    // shared_ptr constructor (owning) — pb stays alive as long as dyn does
+    dynamic_buffer dyn(pb);
+
+    constexpr std::string_view msg = "mpmc test";
+    const std::size_t copied = net::buffer_copy(dyn.prepare(msg.size()), net::buffer(msg.data(), msg.size()));
+    ASSERT_EQ(copied, msg.size());
+    dyn.commit(copied);
+    EXPECT_EQ(dyn.size(), msg.size());
+
+    // consume() publishes into the multiplexer's shared queue via producer_buffer
+    auto rec = dyn.consume(msg.size());
+    ASSERT_TRUE(static_cast<bool>(rec));
+    EXPECT_EQ(rec.length, msg.size());
+    EXPECT_EQ(std::memcmp(rec.data, msg.data(), msg.size()), 0);
+
+    // multiplexer consumer can read it back
+    uint64_t cursor = 0;
+    auto mrec = mux.read(cursor);
+    ASSERT_TRUE(mrec);
+    EXPECT_EQ(mrec.producer_id, 0u);
+    EXPECT_EQ(mrec.length, msg.size());
+    EXPECT_EQ(std::memcmp(mrec.data, msg.data(), msg.size()), 0);
+    EXPECT_EQ(mux.loss_count(), 0u);
+}
+
+TEST(DynamicBufferTests, ProducerBufferBufferPtrSharesOwnership) {
+    stream_buffer_multiplexer mux(64);
+    auto pb = mux.add_producer(0, 1024, 16);
+
+    dynamic_buffer dyn(pb);
+    auto ptr = dyn.buffer_ptr();  // shared_ptr to same producer_buffer
+    EXPECT_EQ(ptr.get(), pb.get());
+    EXPECT_GT(ptr.use_count(), 1);  // dyn + pb + ptr all share
 }

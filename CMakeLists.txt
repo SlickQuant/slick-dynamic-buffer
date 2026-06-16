@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 project(slick-dynamic-buffer
         VERSION 1.0.0
-        DESCRIPTION "Header-only Boost.Asio DynamicBuffer adapter for slick-stream-buffer - zero-copy fan-out of received network bytes to lock-free SPMC consumers across threads and processes"
+        DESCRIPTION "Header-only Boost.Asio DynamicBuffer adapter for slick buffer backends (stream_buffer, producer_buffer) - zero-copy fan-out of received network bytes to lock-free consumers"
         LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -11,22 +11,6 @@ set(CMAKE_CXX_STANDARD 20)
 option(BUILD_SLICK_DYNAMIC_BUFFER_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 
 find_package(Boost CONFIG REQUIRED COMPONENTS asio)
-find_package(slick-stream-buffer CONFIG QUIET)
-
-if (NOT slick-stream-buffer_FOUND)
-    include(FetchContent)
-
-    # Disable slick-stream-buffer tests and examples, but allow installation
-    set(BUILD_SLICK_STREAM_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        slick-stream-buffer
-        GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer.git
-        GIT_TAG v1.0.4 # See https://github.com/SlickQuant/slick-stream-buffer/releases for latest version
-    )
-    FetchContent_MakeAvailable(slick-stream-buffer)
-else()
-    message(STATUS "slick-stream-buffer: ${slick-stream-buffer_VERSION}")
-endif()
 
 add_library(slick-dynamic-buffer INTERFACE)
 add_library(slick::dynamic_buffer ALIAS slick-dynamic-buffer)
@@ -37,7 +21,7 @@ target_include_directories(slick-dynamic-buffer INTERFACE
 )
 set_target_properties(slick-dynamic-buffer PROPERTIES EXPORT_NAME dynamic_buffer)
 
-target_link_libraries(slick-dynamic-buffer INTERFACE slick::stream_buffer Boost::asio)
+target_link_libraries(slick-dynamic-buffer INTERFACE Boost::asio)
 
 if(BUILD_SLICK_DYNAMIC_BUFFER_TESTS)
     enable_testing()

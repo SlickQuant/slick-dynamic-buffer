@@ -12,17 +12,54 @@ if(NOT GTest_FOUND)
   FetchContent_MakeAvailable(googletest)
 endif()
 
+# slick-stream-buffer: tests use it as a backend
+find_package(slick-stream-buffer 1.0.4 CONFIG QUIET)
+if(NOT slick-stream-buffer_FOUND)
+  include(FetchContent)
+  set(BUILD_SLICK_STREAM_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    slick-stream-buffer
+    GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer.git
+    GIT_TAG v1.0.4  # See https://github.com/SlickQuant/slick-stream-buffer/releases for latest version
+  )
+  FetchContent_MakeAvailable(slick-stream-buffer)
+else()
+  message(STATUS "Found slick-stream-buffer: ${slick-stream-buffer_VERSION}")
+endif()
+
+find_package(slick-stream-buffer-multiplexer CONFIG QUIET)
+if(NOT slick-stream-buffer-multiplexer_FOUND)
+  include(FetchContent)
+  set(BUILD_SLICK_STREAM_BUFFER_MULTIPLEXER_TESTS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    slick-stream-buffer-multiplexer
+    GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer-multiplexer.git
+    GIT_TAG v1.0.0  # See https://github.com/SlickQuant/slick-stream-buffer-multiplexer/releases for latest version
+  )
+  FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
+else()
+  message(STATUS "Found slick-stream-buffer-multiplexer: ${slick-stream-buffer-multiplexer_VERSION}")
+endif()
+
 add_executable(slick-dynamic-buffer-tests
   dynamic_buffer_tests.cpp
 )
-if(MSVC)
-  add_compile_options(/wd4996)
-endif()
 
-target_link_libraries(slick-dynamic-buffer-tests PRIVATE slick::dynamic_buffer Boost::asio GTest::gtest_main)
+target_link_libraries(slick-dynamic-buffer-tests PRIVATE
+  slick::dynamic_buffer
+  slick::stream_buffer
+  slick::stream_buffer_multiplexer
+  Boost::asio
+  GTest::gtest_main)
 
-# Enable loss detection in slick-stream-buffer dependency for testing purposes (this is not enabled by default since it adds some overhead)
-target_compile_definitions(slick-dynamic-buffer-tests PRIVATE SLICK_STREAM_BUFFER_ENABLE_LOSS_DETECTION=1)
+target_compile_definitions(slick-dynamic-buffer-tests PRIVATE
+  SLICK_STREAM_BUFFER_ENABLE_LOSS_DETECTION=1
+  SLICK_STREAM_BUFFER_MULTIPLEXER_ENABLE_LOSS_DETECTION=1
+  _WIN32_WINNT=0x0A00)
+
+# if(MSVC)
+#   target_compile_options(slick-dynamic-buffer-tests PRIVATE /wd4996)
+# endif()
 
 include(GoogleTest)
 gtest_discover_tests(slick-dynamic-buffer-tests)
