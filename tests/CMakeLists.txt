@@ -13,28 +13,28 @@ if(NOT GTest_FOUND)
 endif()
 
 # slick-stream-buffer: tests use it as a backend
-find_package(slick-stream-buffer 1.0.4 CONFIG QUIET)
+find_package(slick-stream-buffer 1.0.5 CONFIG QUIET)
 if(NOT slick-stream-buffer_FOUND)
   include(FetchContent)
   set(BUILD_SLICK_STREAM_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(
     slick-stream-buffer
     GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer.git
-    GIT_TAG v1.0.4  # See https://github.com/SlickQuant/slick-stream-buffer/releases for latest version
+    GIT_TAG v1.0.5  # See https://github.com/SlickQuant/slick-stream-buffer/releases for latest version
   )
   FetchContent_MakeAvailable(slick-stream-buffer)
 else()
   message(STATUS "Found slick-stream-buffer: ${slick-stream-buffer_VERSION}")
 endif()
 
-find_package(slick-stream-buffer-multiplexer CONFIG QUIET)
+find_package(slick-stream-buffer-multiplexer 1.0.1 CONFIG QUIET)
 if(NOT slick-stream-buffer-multiplexer_FOUND)
   include(FetchContent)
   set(BUILD_SLICK_STREAM_BUFFER_MULTIPLEXER_TESTS OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(
     slick-stream-buffer-multiplexer
     GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer-multiplexer.git
-    GIT_TAG v1.0.0  # See https://github.com/SlickQuant/slick-stream-buffer-multiplexer/releases for latest version
+    GIT_TAG v1.0.1  # See https://github.com/SlickQuant/slick-stream-buffer-multiplexer/releases for latest version
   )
   FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
 else()

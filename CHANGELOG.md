@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.1 - 2026-06-17
+
+- Renamed canonical header from `slick/dynamic_buffer.h` to `slick/dynamic_buffer.hpp`. The old .h path is kept as a backward-compatibility shim that re-exports the new header and emits a compiler warning directing users to update their includes.
+
 ## v1.0.0 - 2026-06-16
 
 ### Added

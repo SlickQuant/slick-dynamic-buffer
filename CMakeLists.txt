@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 
 project(slick-dynamic-buffer
-        VERSION 1.0.0
+        VERSION 1.0.1
         DESCRIPTION "Header-only Boost.Asio DynamicBuffer adapter for slick buffer backends (stream_buffer, producer_buffer) - zero-copy fan-out of received network bytes to lock-free consumers"
         LANGUAGES CXX)
 

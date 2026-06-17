@@ -19,9 +19,9 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
-#include <slick/dynamic_buffer.h>
-#include <slick/stream_buffer.h>
-#include <slick/stream_buffer_multiplexer.h>
+#include <slick/dynamic_buffer.hpp>
+#include <slick/stream_buffer.hpp>
+#include <slick/stream_buffer_multiplexer.hpp>
 
 #include <cstring>
 #include <string>

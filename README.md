@@ -19,7 +19,7 @@ Supported backends (any type satisfying `slick::buffer_backend`):
 | `slick::stream_buffer_multiplexer::producer_buffer` | Fans into an MPMC shared queue so multiplexer consumers receive the record |
 
 The library has **no hard dependency** on either backend — bring your own and include the
-relevant header alongside `<slick/dynamic_buffer.h>`.
+relevant header alongside `<slick/dynamic_buffer.hpp>`.
 
 ## How it works
 
@@ -64,10 +64,10 @@ from the underlying buffer.
 Header-only. Add the `include` directory to your include path:
 
 ```cpp
-#include <slick/dynamic_buffer.h>
+#include <slick/dynamic_buffer.hpp>
 // also include your chosen backend:
-#include <slick/stream_buffer.h>               // for stream_buffer backend
-#include <slick/stream_buffer_multiplexer.h>   // for producer_buffer backend
+#include <slick/stream_buffer.hpp>               // for stream_buffer backend
+#include <slick/stream_buffer_multiplexer.hpp>   // for producer_buffer backend
 ```
 
 ### Using CMake FetchContent
@@ -94,8 +94,8 @@ target_link_libraries(your_target PRIVATE
 ### With `slick::stream_buffer` (SPMC)
 
 ```cpp
-#include <slick/dynamic_buffer.h>
-#include <slick/stream_buffer.h>
+#include <slick/dynamic_buffer.hpp>
+#include <slick/stream_buffer.hpp>
 
 // 64 MB data ring, 64K message records; named -> shared memory, nullptr -> local
 slick::stream_buffer stream(1ull << 26, 1u << 16, "market_data");
@@ -131,8 +131,8 @@ for (;;) {
 ### With `slick::stream_buffer_multiplexer::producer_buffer` (MPMC)
 
 ```cpp
-#include <slick/dynamic_buffer.h>
-#include <slick/stream_buffer_multiplexer.h>
+#include <slick/dynamic_buffer.hpp>
+#include <slick/stream_buffer_multiplexer.hpp>
 
 slick::stream_buffer_multiplexer mux(1024);
 auto pb = mux.add_producer(0, 1ull << 26, 1u << 16);  // shared_ptr<producer_buffer>
