@@ -54,8 +54,13 @@ from the underlying buffer.
 
 ## Requirements
 
-- C++20 compatible compiler
-- Boost.Asio — only the buffer types are used (`boost/asio/buffer.hpp`)
+- C++20 compatible compiler — the `slick::dynamic_buffer` CMake target requires
+  `cxx_std_20`, so consumers are raised to C++20 automatically
+- Boost.Asio — only the buffer types are used (`boost/asio/buffer.hpp`). Any Boost
+  installation works: the modular `Boost::asio` target (vcpkg, Boost ≥ 1.82) is preferred,
+  then the header-only `Boost::headers` target, then the `FindBoost` module (apt, brew).
+  The installed package config runs that same resolution on the **consumer's** machine, so
+  a package built against one Boost provider stays usable with another
 - A slick buffer backend — `slick-stream-buffer` and/or `slick-stream-buffer-multiplexer`
   (not fetched automatically; include the backend header and link its target yourself)
 
@@ -79,7 +84,7 @@ set(BUILD_SLICK_DYNAMIC_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     slick-dynamic-buffer
     GIT_REPOSITORY https://github.com/SlickQuant/slick-dynamic-buffer.git
-    GIT_TAG v1.0.0
+    GIT_TAG v1.0.2      # <slick/dynamic_buffer.hpp> exists from v1.0.1 onwards
 )
 FetchContent_MakeAvailable(slick-dynamic-buffer)
 
@@ -173,20 +178,24 @@ concept buffer_backend = requires(T& b, const T& cb, std::size_t n) {
 
 ```cpp
 // Shared-ownership constructor (natural for shared_ptr backends like producer_buffer)
+// throws std::invalid_argument if ptr is empty
 explicit dynamic_buffer(std::shared_ptr<BufferT> ptr,
-                        std::size_t max_size = /* unlimited */) noexcept;
+                        std::size_t max_size = /* unlimited */);
 
 // Non-owning reference constructor (backward-compatible; caller manages lifetime)
 explicit dynamic_buffer(BufferT& buffer,
-                        std::size_t max_size = /* unlimited */);
+                        std::size_t max_size = /* unlimited */) noexcept;
 ```
 
 Both constructors clamp `max_size` to `buffer.capacity()`. The adapter is a cheap
-copyable handle — asio composed operations copy `DynamicBuffer_v1` objects by value;
-copies share the underlying `shared_ptr`.
+copyable handle — asio composed operations copy `DynamicBuffer_v1` objects by value.
+The reference constructor stores only a raw pointer, so copying it costs neither an
+allocation nor atomic reference-count traffic; the `shared_ptr` constructor additionally
+carries the owning handle, and copies share it.
 
 - `mutable_buffers_type prepare(std::size_t n)` — contiguous writable region of n bytes;
-  throws `std::length_error` if `size() + n > max_size()`
+  throws `std::length_error` if `n` exceeds the room left by `max_size()` (overflow-safe,
+  so a huge `n` is rejected rather than wrapping)
 - `void commit(std::size_t n)` — make n prepared bytes readable
 - `auto consume(std::size_t n)` — publish the first n readable bytes as **one message
   record**; return type is deduced from `BufferT::consume()` — a `published_record` for
@@ -194,9 +203,14 @@ copies share the underlying `shared_ptr`.
 - `void clear()` — drop the readable bytes and any prepared region **without publishing**,
   matching `beast::flat_buffer::clear()`
 - `const_buffers_type data()` / `std::size_t size()` — the readable (committed, unconsumed) region
-- `std::size_t max_size()` / `std::size_t capacity()` — limits, as required by `DynamicBuffer_v1`
+- `std::size_t max_size()` / `std::size_t capacity()` — limits, as required by
+  `DynamicBuffer_v1`; `capacity()` never exceeds `max_size()`, so asio never sizes a read
+  larger than `prepare()` accepts
 - `BufferT& buffer()` / `const BufferT& buffer() const` — access the underlying backend
-- `std::shared_ptr<BufferT> buffer_ptr()` — shared-ownership handle to the backend
+- `std::shared_ptr<BufferT> buffer_ptr()` — handle to the backend: the owning handle for a
+  `shared_ptr`-constructed adapter, otherwise a null-deleter handle built on demand
+  (lifetime stays with the caller)
+- `bool owns_buffer()` — true if this adapter keeps the backend alive
 
 ## Important Constraints
 
@@ -229,6 +243,14 @@ ctest --test-dir build -C Debug --output-on-failure
 ```
 
 Boost.Asio and at least one slick backend are required to build the tests.
+
+The suite includes a packaging test that installs the project into a scratch prefix and
+builds a consumer configured for C++17 against it, checking that the exported target
+raises the standard to C++20 and that the generated package config resolves Boost on its
+own. It drives a second CMake project, so it costs much more than a unit test — its build
+tree is reused between runs, but the first run pays a full configure. Skip it with
+`ctest -LE packaging`, or turn it off with
+`-DBUILD_SLICK_DYNAMIC_BUFFER_INSTALL_TEST=OFF`.
 
 ## License
 

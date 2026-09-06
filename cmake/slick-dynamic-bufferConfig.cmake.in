@@ -1,8 +1,34 @@
 @PACKAGE_INIT@
 
-include(CMakeFindDependencyMacro)
-find_dependency(Boost CONFIG REQUIRED COMPONENTS asio)
+# Boost.Asio is a header-only dependency, and which imported target supplies it depends
+# on the Boost installation, not on this package. So resolve it here, on the consumer
+# machine, with the same ladder the build used - a package built against vcpkg
+# (Boost::asio) stays usable where only Boost::headers or Boost::boost exists. Nothing
+# about the build environment is recorded in the exported target.
+include("${CMAKE_CURRENT_LIST_DIR}/slick_find_boost_asio.cmake")
+slick_dynamic_buffer_find_boost_asio(_slick_dynamic_buffer_boost_target)
+
+if(NOT _slick_dynamic_buffer_boost_target)
+    set(slick-dynamic-buffer_FOUND FALSE)
+    set(slick-dynamic-buffer_NOT_FOUND_MESSAGE
+        "slick-dynamic-buffer requires the Boost.Asio headers, but no Boost installation "
+        "providing Boost::asio, Boost::headers or Boost::boost was found.")
+    unset(_slick_dynamic_buffer_boost_target)
+    return()
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/slick-dynamic-bufferTargets.cmake")
+
+# Attach the Boost that was just resolved. Appended rather than set, and guarded so a
+# second find_package(slick-dynamic-buffer) in the same project does not duplicate it.
+get_property(_slick_dynamic_buffer_links
+             TARGET slick::dynamic_buffer PROPERTY INTERFACE_LINK_LIBRARIES)
+if(NOT "${_slick_dynamic_buffer_boost_target}" IN_LIST _slick_dynamic_buffer_links)
+    set_property(TARGET slick::dynamic_buffer APPEND PROPERTY
+                 INTERFACE_LINK_LIBRARIES "${_slick_dynamic_buffer_boost_target}")
+endif()
+
+unset(_slick_dynamic_buffer_links)
+unset(_slick_dynamic_buffer_boost_target)
 
 check_required_components(slick-dynamic-buffer)

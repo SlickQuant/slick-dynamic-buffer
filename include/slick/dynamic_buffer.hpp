@@ -56,10 +56,12 @@ concept buffer_backend = requires(T& b, const T& cb, std::size_t n) {
  *  - slick::stream_buffer_multiplexer::producer_buffer — fans into the shared MPMC queue
  *
  * This is a cheap copyable handle: asio composed operations copy DynamicBuffer_v1 objects
- * by value, so the adapter stores a std::shared_ptr to the backend. Two constructors are
- * provided: a shared-ownership one (pass shared_ptr<BufferT>, e.g. from add_producer())
- * and a non-owning reference one (pass BufferT&, caller must ensure the backend outlives
- * all copies).
+ * by value, so the adapter stores a raw pointer to the backend plus, for the owning
+ * constructor only, a std::shared_ptr that keeps it alive. Two constructors are provided:
+ * a shared-ownership one (pass shared_ptr<BufferT>, e.g. from add_producer()) and a
+ * non-owning reference one (pass BufferT&, caller must ensure the backend outlives all
+ * copies). The reference form stores no shared_ptr at all, so copying it costs neither an
+ * allocation nor atomic reference-count traffic.
  *
  * Note: each consume(n) call publishes exactly one record. If a protocol layer consumes
  * incrementally (e.g. the beast HTTP parser), records correspond to those increments; call
@@ -78,14 +80,14 @@ public:
      * @param ptr   Shared pointer to the backend; the backend stays alive as long as
      *              this adapter (or any copy) holds a reference.
      * @param max_size Optional cap on size() + prepared bytes; clamped to backend capacity.
+     * @throws std::invalid_argument if ptr is empty — there is no backend to adapt.
      */
     explicit dynamic_buffer(
         std::shared_ptr<BufferT> ptr,
-        std::size_t max_size = (std::numeric_limits<std::size_t>::max)()) noexcept
-        : buffer_(std::move(ptr))
-        , max_size_(max_size < buffer_->capacity()
-                        ? max_size
-                        : static_cast<std::size_t>(buffer_->capacity()))
+        std::size_t max_size = (std::numeric_limits<std::size_t>::max)())
+        : buffer_(checked(ptr))
+        , max_size_(clamp_max_size(max_size, *buffer_))
+        , owner_(std::move(ptr))
     {
     }
 
@@ -95,13 +97,14 @@ public:
      * @param max_size Optional cap on size() + prepared bytes; clamped to buffer.capacity().
      *                 beast/asio read operations use max_size() to limit how much they read.
      *
-     * Internally wraps the reference in a shared_ptr with a null deleter so copies are
-     * cheap, but lifetime management remains the caller's responsibility.
+     * Stores only a raw pointer: lifetime management stays the responsibility of the
+     * caller, and copies of the adapter are trivially cheap.
      */
     explicit dynamic_buffer(
         BufferT& buffer,
-        std::size_t max_size = (std::numeric_limits<std::size_t>::max)())
-        : dynamic_buffer(std::shared_ptr<BufferT>(&buffer, [](BufferT*){}), max_size)
+        std::size_t max_size = (std::numeric_limits<std::size_t>::max)()) noexcept
+        : buffer_(std::addressof(buffer))
+        , max_size_(clamp_max_size(max_size, buffer))
     {
     }
 
@@ -114,8 +117,12 @@ public:
     /// The maximum sum of readable and writable bytes
     std::size_t max_size() const noexcept { return max_size_; }
 
-    /// The maximum sum of readable and writable bytes that can be held without relocation
-    std::size_t capacity() const noexcept { return static_cast<std::size_t>(buffer_->capacity()); }
+    /// The maximum sum of readable and writable bytes that can be held without relocation.
+    /// Never exceeds max_size(): a capped adapter must not advertise room prepare() refuses.
+    std::size_t capacity() const noexcept {
+        const std::size_t cap = static_cast<std::size_t>(buffer_->capacity());
+        return cap < max_size_ ? cap : max_size_;
+    }
 
     /// The readable bytes as a single contiguous buffer
     const_buffers_type data() const noexcept {
@@ -127,7 +134,9 @@ public:
      * @throws std::length_error if size() + n exceeds max_size().
      */
     mutable_buffers_type prepare(std::size_t n) {
-        if (buffer_->size() + n > max_size_) {
+        // Written as a subtraction: size() + n wraps for a huge n and slips past the cap.
+        const std::size_t current = buffer_->size();
+        if (current > max_size_ || n > max_size_ - current) {
             throw std::length_error("dynamic_buffer too long");
         }
         auto [ptr, sz] = buffer_->prepare(n);
@@ -154,12 +163,36 @@ public:
     const BufferT& buffer() const noexcept { return *buffer_; }
 
     /// Shared-ownership handle to the backend, so it can safely outlive this adapter.
-    std::shared_ptr<BufferT>       buffer_ptr() noexcept       { return buffer_; }
-    std::shared_ptr<const BufferT> buffer_ptr() const noexcept { return buffer_; }
+    /// A reference-constructed adapter has no ownership to share: it hands back a handle
+    /// with a null deleter — built on demand here, never on the copy path — so the
+    /// backend lifetime stays the responsibility of the caller.
+    std::shared_ptr<BufferT> buffer_ptr() {
+        return owner_ ? owner_ : std::shared_ptr<BufferT>(buffer_, [](BufferT*){});
+    }
+    std::shared_ptr<const BufferT> buffer_ptr() const {
+        return owner_ ? std::shared_ptr<const BufferT>(owner_)
+                      : std::shared_ptr<const BufferT>(buffer_, [](const BufferT*){});
+    }
+
+    /// True if this adapter keeps the backend alive (shared_ptr constructor)
+    bool owns_buffer() const noexcept { return static_cast<bool>(owner_); }
 
 private:
-    std::shared_ptr<BufferT> buffer_;
+    static BufferT* checked(const std::shared_ptr<BufferT>& ptr) {
+        if (!ptr) {
+            throw std::invalid_argument("dynamic_buffer: null buffer pointer");
+        }
+        return ptr.get();
+    }
+
+    static std::size_t clamp_max_size(std::size_t max_size, const BufferT& buffer) noexcept {
+        const std::size_t cap = static_cast<std::size_t>(buffer.capacity());
+        return max_size < cap ? max_size : cap;
+    }
+
+    BufferT*    buffer_;    // never null; the only pointer the hot path touches
     std::size_t max_size_;
+    std::shared_ptr<BufferT> owner_;    // empty for the non-owning constructor
 };
 
 }  // namespace slick

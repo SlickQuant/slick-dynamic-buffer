@@ -49,7 +49,7 @@ target_link_libraries(slick-dynamic-buffer-tests PRIVATE
   slick::dynamic_buffer
   slick::stream_buffer
   slick::stream_buffer_multiplexer
-  Boost::asio
+  ${SLICK_DYNAMIC_BUFFER_BOOST_TARGET}
   GTest::gtest_main)
 
 target_compile_definitions(slick-dynamic-buffer-tests PRIVATE
@@ -59,3 +59,32 @@ target_compile_definitions(slick-dynamic-buffer-tests PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(slick-dynamic-buffer-tests)
+
+# Packaging regression test: install the project into a scratch prefix and build a
+# consumer that asks for C++17. It fails if the exported target stops propagating
+# cxx_std_20, or if the generated package config cannot resolve Boost on its own.
+# It drives a second CMake project, so it costs far more than a unit test: skip it with
+# ctest -LE packaging, or turn it off entirely. Off by default in nested builds.
+option(BUILD_SLICK_DYNAMIC_BUFFER_INSTALL_TEST
+       "Build the install-and-consume packaging test" ${PROJECT_IS_TOP_LEVEL})
+
+if(BUILD_SLICK_DYNAMIC_BUFFER_INSTALL_TEST)
+  add_test(NAME InstallTests.InstalledPackageBuildsWithCxx17Consumer
+    COMMAND ${CMAKE_COMMAND}
+      "-DPARENT_BUILD_DIR=${CMAKE_BINARY_DIR}"
+      "-DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/install_consumer"
+      "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/install-test"
+      "-DGENERATOR=${CMAKE_GENERATOR}"
+      "-DGENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+      "-DGENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+      "-DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+      "-DTOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+      "-DPREFIX_PATH=${CMAKE_PREFIX_PATH}"
+      "-DCTEST_EXECUTABLE=${CMAKE_CTEST_COMMAND}"
+      "-DBUILD_CONFIG=$<CONFIG>"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/install_and_consume.cmake")
+  set_tests_properties(InstallTests.InstalledPackageBuildsWithCxx17Consumer PROPERTIES
+    TIMEOUT 900
+    LABELS packaging
+    RUN_SERIAL TRUE)   # drives its own compiler; do not overlap with the unit tests
+endif()

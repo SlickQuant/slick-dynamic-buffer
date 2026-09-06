@@ -24,6 +24,8 @@
 #include <slick/stream_buffer_multiplexer.hpp>
 
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -272,4 +274,100 @@ TEST(DynamicBufferTests, ProducerBufferBufferPtrSharesOwnership) {
     auto ptr = dyn.buffer_ptr();  // shared_ptr to same producer_buffer
     EXPECT_EQ(ptr.get(), pb.get());
     EXPECT_GT(ptr.use_count(), 1);  // dyn + pb + ptr all share
+}
+
+// Regression: prepare(n) used to compute size() + n, which wraps for a huge n and
+// slipped past the max_size cap, handing back a writable region the ring cannot hold.
+TEST(DynamicBufferTests, PrepareRejectsSizeOverflow) {
+    stream_buffer sb(1024, 16);
+    dynamic_buffer dyn(sb);
+    ASSERT_EQ(dyn.max_size(), sb.capacity());
+
+    constexpr std::size_t max_n = (std::numeric_limits<std::size_t>::max)();
+    EXPECT_THROW(dyn.prepare(max_n), std::length_error);
+
+    // one committed byte is what makes the old check wrap to 0
+    net::buffer_copy(dyn.prepare(1), net::buffer(std::string(1, 'a')));
+    dyn.commit(1);
+    ASSERT_EQ(dyn.size(), 1u);
+    EXPECT_THROW(dyn.prepare(max_n), std::length_error);
+    EXPECT_THROW(dyn.prepare(max_n - 1), std::length_error);
+    EXPECT_THROW(dyn.prepare(dyn.max_size()), std::length_error);
+
+    // the exact remaining room is still accepted
+    EXPECT_NO_THROW(dyn.prepare(dyn.max_size() - dyn.size()));
+}
+
+// Same overflow, on a capped adapter: the cap has to hold whatever n is passed.
+TEST(DynamicBufferTests, PrepareRejectsSizeOverflowWhenCapped) {
+    stream_buffer sb(1024, 16);
+    dynamic_buffer dyn(sb, 16);
+
+    net::buffer_copy(dyn.prepare(1), net::buffer(std::string(1, 'a')));
+    dyn.commit(1);
+    EXPECT_THROW(dyn.prepare((std::numeric_limits<std::size_t>::max)()), std::length_error);
+    EXPECT_NO_THROW(dyn.prepare(15));
+}
+
+// Regression: capacity() reported the whole ring even when max_size capped the
+// adapter far below it, contradicting max_size() and prepare(). Asio derives its
+// read sizes from capacity(), so it must never promise room prepare() refuses.
+TEST(DynamicBufferTests, CapacityNeverExceedsMaxSize) {
+    stream_buffer sb(1024, 16);
+
+    dynamic_buffer capped(sb, 16);
+    EXPECT_EQ(capped.capacity(), 16u);
+    EXPECT_LE(capped.capacity(), capped.max_size());
+    EXPECT_THROW(capped.prepare(capped.capacity() + 1), std::length_error);
+
+    dynamic_buffer uncapped(sb);
+    EXPECT_EQ(uncapped.capacity(), sb.capacity());
+}
+
+// Regression: an empty shared_ptr was dereferenced in a noexcept constructor,
+// terminating instead of reporting the error.
+TEST(DynamicBufferTests, NullSharedPtrThrowsInvalidArgument) {
+    EXPECT_THROW(dynamic_buffer<stream_buffer>(std::shared_ptr<stream_buffer>{}),
+                 std::invalid_argument);
+    EXPECT_THROW(dynamic_buffer<stream_buffer>(std::shared_ptr<stream_buffer>{}, 16),
+                 std::invalid_argument);
+}
+
+// The reference constructor stores no shared_ptr (no control block, no atomics on the
+// copy path), but buffer_ptr() must still hand back a non-owning handle to the backend.
+TEST(DynamicBufferTests, ReferenceConstructedAdapterDoesNotOwnBuffer) {
+    stream_buffer sb(1024, 16);
+    dynamic_buffer dyn(sb);
+    EXPECT_FALSE(dyn.owns_buffer());
+
+    {
+        auto ptr = dyn.buffer_ptr();
+        EXPECT_EQ(ptr.get(), &sb);
+        EXPECT_EQ(ptr.use_count(), 1);   // null deleter, not shared with the adapter
+    }
+
+    // the handle going out of scope must not have destroyed the caller-owned backend
+    const std::string msg = "still alive";
+    net::buffer_copy(dyn.prepare(msg.size()), net::buffer(msg));
+    dyn.commit(msg.size());
+    auto record = dyn.consume(msg.size());
+    ASSERT_TRUE(static_cast<bool>(record));
+    EXPECT_EQ(record.length, msg.size());
+
+    // copies of a non-owning adapter stay non-owning
+    dynamic_buffer copy = dyn;
+    EXPECT_FALSE(copy.owns_buffer());
+    EXPECT_EQ(&copy.buffer(), &sb);
+}
+
+TEST(DynamicBufferTests, SharedPtrConstructedAdapterOwnsBuffer) {
+    stream_buffer_multiplexer mux(64);
+    auto pb = mux.add_producer(0, 1024, 16);
+
+    dynamic_buffer dyn(pb);
+    EXPECT_TRUE(dyn.owns_buffer());
+
+    dynamic_buffer copy = dyn;   // asio copies DynamicBuffer_v1 objects by value
+    EXPECT_TRUE(copy.owns_buffer());
+    EXPECT_EQ(&copy.buffer(), pb.get());
 }

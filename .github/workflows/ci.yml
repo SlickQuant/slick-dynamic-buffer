@@ -21,8 +21,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # apt/brew Boost ships no boost_asio-config.cmake, so
-    # find_package(Boost CONFIG COMPONENTS asio) only works with vcpkg's Boost.
+    # This job covers the modular-Boost path (Boost::asio from boost_asio-config.cmake);
+    # the system-boost job below covers the header-only fallback.
     # vcpkg is preinstalled on all GitHub-hosted runners, but the macOS image
     # does not set VCPKG_INSTALLATION_ROOT - bootstrap our own copy if missing.
     - name: Set up vcpkg
@@ -69,3 +69,25 @@ jobs:
     - name: Run Tests
       working-directory: build
       run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+  # Distribution Boost without a boost_asio-config.cmake: proves the header-only
+  # fallback in the Boost ladder works, for the build and for the installed package
+  # config (exercised by the install-and-consume test).
+  build-and-test-system-boost:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Boost headers (apt)
+      run: sudo apt-get update && sudo apt-get install -y libboost-dev
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Run Tests
+      working-directory: build
+      run: ctest -C Release --output-on-failure
